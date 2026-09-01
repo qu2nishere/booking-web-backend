@@ -2,6 +2,7 @@ package org.example.project_cuoiky_congnghephanmem_oose.controller;
 
 import jakarta.validation.Valid;
 import org.example.project_cuoiky_congnghephanmem_oose.dto.request.ForgotPasswordRequest;
+import org.example.project_cuoiky_congnghephanmem_oose.dto.request.GoogleLoginRequest;
 import org.example.project_cuoiky_congnghephanmem_oose.dto.request.LoginRequest;
 import org.example.project_cuoiky_congnghephanmem_oose.dto.request.RegisterRequest;
 import org.example.project_cuoiky_congnghephanmem_oose.dto.request.VerifyOtpRequest;
@@ -27,9 +28,23 @@ public class AuthController {
         return ResponseEntity.ok(response);
     }
 
+    // Xác thực OTP đăng ký -> tạo tài khoản
+    @PostMapping("/register/verify")
+    public ResponseEntity<AuthResponse> verifyRegister(@RequestBody VerifyOtpRequest request) {
+        AuthResponse response = authService.verifyRegister(request.getEmail(), request.getOtpCode());
+        return ResponseEntity.ok(response);
+    }
+
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
         AuthResponse response = authService.login(request);
+        return ResponseEntity.ok(response);
+    }
+
+    // Đăng nhập bằng Google (frontend gửi ID token)
+    @PostMapping("/google")
+    public ResponseEntity<AuthResponse> googleLogin(@Valid @RequestBody GoogleLoginRequest request) {
+        AuthResponse response = authService.loginWithGoogle(request.getCredential());
         return ResponseEntity.ok(response);
     }
 
@@ -46,6 +61,16 @@ public class AuthController {
             return ResponseEntity.ok("Xác thực OTP thành công!");
         } else {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("Mã OTP không chính xác hoặc đã hết hạn!");
+        }
+    }
+
+    @PostMapping("/reset-password")
+    public ResponseEntity<String> resetPassword(@Valid @RequestBody org.example.project_cuoiky_congnghephanmem_oose.dto.request.ResetPasswordRequest request) {
+        try {
+            authService.resetPassword(request.getEmail(), request.getNewPassword());
+            return ResponseEntity.ok("Đặt lại mật khẩu thành công!");
+        } catch (RuntimeException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
         }
     }
 }

@@ -33,15 +33,18 @@ public class VnPayUtil {
         vnpParams.put("vnp_TmnCode", tmnCode);
         vnpParams.put("vnp_Amount", String.valueOf(amount * 100));
         vnpParams.put("vnp_CurrCode", "VND");
-        vnpParams.put("vnp_TxnRef", String.valueOf(bookingId));
+        // TxnRef phải UNIQUE mỗi lần gọi VNPAY (VNPAY từ chối TxnRef trùng trong 24h)
+        String txnRef = bookingId + "_" + System.currentTimeMillis();
+        vnpParams.put("vnp_TxnRef", txnRef);
         vnpParams.put("vnp_OrderInfo", "Thanh toan booking #" + bookingId);
         vnpParams.put("vnp_OrderType", "other");
         vnpParams.put("vnp_Locale", "vn");
         vnpParams.put("vnp_ReturnUrl", returnUrl);
         vnpParams.put("vnp_IpAddr", ipAddress);
 
-        Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("Etc/GMT+7"));
+        Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Ho_Chi_Minh"));
         SimpleDateFormat formatter = new SimpleDateFormat("yyyyMMddHHmmss");
+        formatter.setTimeZone(TimeZone.getTimeZone("Asia/Ho_Chi_Minh"));
         vnpParams.put("vnp_CreateDate", formatter.format(calendar.getTime()));
         calendar.add(Calendar.MINUTE, 15);
         vnpParams.put("vnp_ExpireDate", formatter.format(calendar.getTime()));

@@ -13,6 +13,7 @@ import org.example.project_cuoiky_congnghephanmem_oose.repository.IBookingReposi
 import org.example.project_cuoiky_congnghephanmem_oose.repository.ICustomerRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IMembershipTierRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IPaymentRepository;
+import org.example.project_cuoiky_congnghephanmem_oose.repository.IUserRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.service.user.IUserService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,6 +22,9 @@ import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
 
+import org.example.project_cuoiky_congnghephanmem_oose.dto.request.ChangePasswordRequest;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
 @Service
 public class UserServiceImpl implements IUserService {
 
@@ -28,15 +32,24 @@ public class UserServiceImpl implements IUserService {
     private final IBookingRepository bookingRepository;
     private final IMembershipTierRepository membershipTierRepository;
     private final IPaymentRepository paymentRepository;
+    private final IUserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final org.example.project_cuoiky_congnghephanmem_oose.util.JwtUtil jwtUtil;
 
     public UserServiceImpl(ICustomerRepository customerRepository,
                            IBookingRepository bookingRepository,
                            IMembershipTierRepository membershipTierRepository,
-                           IPaymentRepository paymentRepository) {
+                           IPaymentRepository paymentRepository,
+                           IUserRepository userRepository,
+                           PasswordEncoder passwordEncoder,
+                           org.example.project_cuoiky_congnghephanmem_oose.util.JwtUtil jwtUtil) {
         this.customerRepository = customerRepository;
         this.bookingRepository = bookingRepository;
         this.membershipTierRepository = membershipTierRepository;
         this.paymentRepository = paymentRepository;
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtUtil = jwtUtil;
     }
 
     @Override
@@ -58,6 +71,7 @@ public class UserServiceImpl implements IUserService {
                 .membershipTier(tier != null ? tier.getTierName() : "Bronze")
                 .discountRate(tier != null ? tier.getDiscountRate() : 0.0)
                 .benefits(tier != null ? tier.getBenefits() : "Giá gốc, hỗ trợ cơ bản")
+                .googleAccount(customer.isGoogleAccount())
                 .build();
     }
 
@@ -67,24 +81,61 @@ public class UserServiceImpl implements IUserService {
         Customer customer = customerRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("Không tìm thấy khách hàng"));
 
-        if (request.getUsername() != null && !request.getUsername().isBlank()) {
-            customer.setUsername(request.getUsername().trim());
+        boolean isGoogle = customer.isGoogleAccount();
+        boolean usernameChanged = false;
+
+        // Tài khoản Google: KHÔNG cho đổi username / email / avatar (chỉ đổi được SĐT, ngày sinh)
+        if (!isGoogle) {
+            if (request.getUsername() != null && !request.getUsername().isBlank()) {
+                String newUsername = request.getUsername().trim();
+                if (!newUsername.equals(customer.getUsername())) {
+                    if (userRepository.existsByUsername(newUsername)) {
+                        throw new RuntimeException("Tên đăng nhập đã tồn tại");
+                    }
+                    customer.setUsername(newUsername);
+                    usernameChanged = true;
+                }
+            }
+            if (request.getEmail() != null && !request.getEmail().isBlank()) {
+                String newEmail = request.getEmail().trim();
+                if (!newEmail.equals(customer.getEmail())) {
+                    // Email mới phải chưa tồn tại trong hệ thống (của bất kỳ tài khoản nào)
+                    if (userRepository.existsByEmail(newEmail)) {
+                        throw new RuntimeException("Email đã được sử dụng bởi tài khoản khác");
+                    }
+                    customer.setEmail(newEmail);
+                }
+            }
+            if (request.getAvatar() != null && !request.getAvatar().isBlank()) {
+                customer.setAvatar(request.getAvatar().trim());
+            }
         }
-        if (request.getEmail() != null && !request.getEmail().isBlank()) {
-            customer.setEmail(request.getEmail().trim());
-        }
+
         if (request.getPhone() != null && !request.getPhone().isBlank()) {
-            customer.setPhone(request.getPhone().trim());
+            String newPhone = request.getPhone().trim();
+            if (!newPhone.equals(customer.getPhone())) {
+                if (customerRepository.findByPhone(newPhone).isPresent()) {
+                    throw new RuntimeException("Số điện thoại đã được sử dụng bởi tài khoản khác");
+                }
+                customer.setPhone(newPhone);
+            }
         }
         if (request.getDateOfBirth() != null) {
             customer.setDateOfBirth(request.getDateOfBirth());
         }
-        if (request.getAvatar() != null && !request.getAvatar().isBlank()) {
-            customer.setAvatar(request.getAvatar().trim());
-        }
 
         customerRepository.save(customer);
-        return getMyProfile(customer.getUsername());
+
+        // Lấy profile mới với username đã cập nhật
+        UserProfileResponse response = getMyProfile(customer.getUsername());
+
+        // Nếu username thay đổi → tạo JWT mới để frontend thay thế token cũ
+        if (usernameChanged) {
+            String newToken = jwtUtil.generateToken(customer.getUsername(), customer.getRole().name());
+            response.setToken(newToken);
+        }
+
+        return response;
     }
 
     @Override
@@ -119,7 +170,16 @@ public class UserServiceImpl implements IUserService {
                 .orElse(null);
 
         boolean expired = booking.getExpiredAt() != null && !booking.getExpiredAt().isAfter(LocalDateTime.now());
-        boolean canRepay = "pending".equalsIgnoreCase(booking.getStatus()) && !expired;
+        boolean canRepay = booking.canBePaid() && !expired;
+
+        double originalTotal = 0;
+        for (BookingDetails detail : booking.getBookingDetails()) {
+            long detailNights = java.time.temporal.ChronoUnit.DAYS.between(detail.getCheckinDate(), detail.getCheckoutDate());
+            if (detailNights <= 0) detailNights = 1;
+            originalTotal += detail.getRoom().getEffectivePrice() * detailNights;
+        }
+        double discountAmount = originalTotal - booking.getTotalPrice();
+        if (discountAmount < 0) discountAmount = 0;
 
         return BookingHistoryResponse.builder()
                 .bookingID(booking.getBookingID())
@@ -130,9 +190,11 @@ public class UserServiceImpl implements IUserService {
                 .expiredAt(booking.getExpiredAt())
                 .canRepay(canRepay)
                 .expired(expired)
+                .discountAmount(discountAmount)
                 .rooms(rooms)
                 .checkin(first != null ? first.getCheckinDate() : null)
                 .checkout(first != null ? first.getCheckoutDate() : null)
+                .isReviewed(booking.getReview() != null)
                 .build();
     }
 
@@ -141,7 +203,7 @@ public class UserServiceImpl implements IUserService {
                 .roomID(detail.getRoom().getRoomID())
                 .roomNumber(detail.getRoom().getRoomNumber())
                 .roomType(detail.getRoom().getRoomType().getTypeName())
-                .pricePerNight(detail.getRoom().getRoomType().getPriceRoom())
+                .pricePerNight(detail.getRoom().getEffectivePrice())
                 .subTotal(detail.getSubTotal())
                 .build();
     }
@@ -155,11 +217,11 @@ public class UserServiceImpl implements IUserService {
     private void syncExpiredBooking(Booking booking) {
         if (booking == null) return;
 
-        if ("pending".equalsIgnoreCase(booking.getStatus())
+        if (booking.isPending()
                 && booking.getExpiredAt() != null
                 && !booking.getExpiredAt().isAfter(LocalDateTime.now())) {
 
-            booking.setStatus("cancelled");
+            booking.cancel();
             bookingRepository.save(booking);
 
             paymentRepository.findByBookingBookingIDOrderByPaymentIDDesc(booking.getBookingID())
@@ -170,5 +232,56 @@ public class UserServiceImpl implements IUserService {
                         }
                     });
         }
+    }
+
+    @Override
+    @Transactional
+    public void changePassword(String username, ChangePasswordRequest request) {
+        Customer customer = customerRepository.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng"));
+
+        if (customer.isGoogleAccount()) {
+            throw new RuntimeException("Tài khoản Google không hỗ trợ đổi mật khẩu");
+        }
+
+        if (!passwordEncoder.matches(request.getOldPassword(), customer.getPassword())) {
+            throw new RuntimeException("Mật khẩu hiện tại không chính xác");
+        }
+
+        if (!request.getNewPassword().equals(request.getConfirmPassword())) {
+            throw new RuntimeException("Mật khẩu mới và xác nhận mật khẩu không khớp");
+        }
+
+        customer.setPassword(passwordEncoder.encode(request.getNewPassword()));
+        customerRepository.save(customer);
+    }
+
+    @Override
+    @Transactional
+    public void cancelBooking(String username, Integer bookingId) {
+        Customer customer = customerRepository.findByUsername(username)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy người dùng"));
+
+        Booking booking = bookingRepository.findById(bookingId)
+                .orElseThrow(() -> new RuntimeException("Không tìm thấy đơn đặt phòng"));
+
+        if (booking.getCustomer().getUserID() != customer.getUserID()) {
+            throw new RuntimeException("Không có quyền hủy đơn đặt phòng này");
+        }
+
+        if (!booking.canBeCancelled()) {
+            throw new RuntimeException("Chỉ có thể hủy đơn đặt phòng đang chờ thanh toán");
+        }
+
+        booking.cancel();
+        bookingRepository.save(booking);
+
+        paymentRepository.findByBookingBookingIDOrderByPaymentIDDesc(booking.getBookingID())
+                .forEach(payment -> {
+                    if ("pending".equalsIgnoreCase(payment.getStatus())) {
+                        payment.setStatus("cancelled");
+                        paymentRepository.save(payment);
+                    }
+                });
     }
 }

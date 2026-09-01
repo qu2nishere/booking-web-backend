@@ -6,6 +6,7 @@ import org.example.project_cuoiky_congnghephanmem_oose.entity.Booking;
 import org.example.project_cuoiky_congnghephanmem_oose.entity.BookingDetails;
 import org.example.project_cuoiky_congnghephanmem_oose.entity.Customer;
 import org.example.project_cuoiky_congnghephanmem_oose.entity.Rooms;
+import org.example.project_cuoiky_congnghephanmem_oose.entity.state.BookingStatus;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IBookingRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.ICustomerRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IMembershipTierRepository;
@@ -72,8 +73,8 @@ public class BookingServiceImpl implements IBookingService {
         }
 
         for (Rooms room : selectedRooms) {
-            if (!"available".equalsIgnoreCase(room.getStatus())) {
-                throw new RuntimeException("Phòng " + room.getRoomNumber() + " hiện không khả dụng");
+            if (room.isOutOfServiceForStay(request.getCheckin(), request.getCheckout())) {
+                throw new RuntimeException("Phòng " + room.getRoomNumber() + " đang bảo trì/ngừng hoạt động trong khoảng ngày này");
             }
             if (room.getRoomType() == null || room.getRoomType().getOccupancy() < guestsPerRoom) {
                 throw new RuntimeException("Phòng " + room.getRoomNumber() + " không đủ sức chứa");
@@ -90,7 +91,7 @@ public class BookingServiceImpl implements IBookingService {
         List<BookingDetails> bookingDetails = new ArrayList<>();
 
         for (Rooms room : selectedRooms) {
-            double originalPrice = room.getRoomType().getPriceRoom();
+            double originalPrice = room.getEffectivePrice();
             double discountedPricePerNight = originalPrice * (1 - discountRate);
             double subTotal = discountedPricePerNight * nights;
 
@@ -109,7 +110,7 @@ public class BookingServiceImpl implements IBookingService {
         Booking booking = Booking.builder()
                 .bookingDate(LocalDateTime.now())
                 .totalPrice(totalPrice)
-                .status("pending")
+                .status(BookingStatus.PENDING)
                 .expiredAt(LocalDateTime.now().plusMinutes(HOLD_MINUTES))
                 .customer(customer)
                 .build();

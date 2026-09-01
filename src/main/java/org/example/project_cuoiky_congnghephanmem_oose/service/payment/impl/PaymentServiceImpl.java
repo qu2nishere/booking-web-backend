@@ -4,6 +4,7 @@ import org.example.project_cuoiky_congnghephanmem_oose.dto.response.PaymentUrlRe
 import org.example.project_cuoiky_congnghephanmem_oose.entity.Booking;
 import org.example.project_cuoiky_congnghephanmem_oose.entity.Customer;
 import org.example.project_cuoiky_congnghephanmem_oose.entity.Payment;
+import org.example.project_cuoiky_congnghephanmem_oose.entity.state.BookingStatus;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IBookingRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.ICustomerRepository;
 import org.example.project_cuoiky_congnghephanmem_oose.repository.IMembershipTierRepository;
@@ -57,12 +58,12 @@ public class PaymentServiceImpl implements IPaymentService {
 
         syncBookingState(booking);
 
-        if (!"pending".equalsIgnoreCase(booking.getStatus())) {
+        if (!booking.canBePaid()) {
             throw new RuntimeException("Booking này không còn ở trạng thái chờ thanh toán");
         }
 
         if (booking.getExpiredAt() == null || !booking.getExpiredAt().isAfter(LocalDateTime.now())) {
-            booking.setStatus("cancelled");
+            booking.cancel();
             bookingRepository.save(booking);
             throw new RuntimeException("Booking đã hết thời gian giữ phòng. Vui lòng đặt lại phòng mới");
         }
@@ -105,11 +106,13 @@ public class PaymentServiceImpl implements IPaymentService {
                 result.put("status", "failed");
                 result.put("message", "Chữ ký VNPay không hợp lệ");
                 result.put("earnedPoint", "0");
-                result.put("bookingStatus", "pending");
+                result.put("bookingStatus", BookingStatus.PENDING);
                 return result;
             }
 
-            int bookingId = Integer.parseInt(params.get("vnp_TxnRef"));
+            // TxnRef có dạng "bookingId_timestamp" → tách lấy bookingId
+            String txnRef = params.get("vnp_TxnRef");
+            int bookingId = Integer.parseInt(txnRef.contains("_") ? txnRef.split("_")[0] : txnRef);
             String responseCode = params.get("vnp_ResponseCode");
             String transactionNo = params.getOrDefault("vnp_TransactionNo", "");
             String amount = params.getOrDefault("vnp_Amount", "0");
@@ -127,7 +130,7 @@ public class PaymentServiceImpl implements IPaymentService {
             result.put("transactionCode", transactionNo);
             result.put("earnedPoint", "0");
 
-            if (!"pending".equalsIgnoreCase(booking.getStatus())) {
+            if (!booking.canBePaid()) {
                 payment.setStatus("failed");
                 paymentRepository.save(payment);
 
@@ -142,7 +145,7 @@ public class PaymentServiceImpl implements IPaymentService {
                 payment.setPaymentDate(LocalDateTime.now());
                 payment.setTransactionCode(transactionNo);
 
-                booking.setStatus("confirmed");
+                booking.confirmPayment();
 
                 Customer customer = booking.getCustomer();
                 int earnedPoint = (int) Math.floor(booking.getTotalPrice() / 100000);
@@ -155,7 +158,12 @@ public class PaymentServiceImpl implements IPaymentService {
                 bookingRepository.save(booking);
                 customerRepository.save(customer);
 
-                emailService.sendBookingConfirmationEmail(customer, booking, payment);
+                try {
+                    emailService.sendBookingConfirmationEmail(customer, booking, payment);
+                } catch (Exception ex) {
+                    System.err.println("Lỗi gửi email xác nhận đặt phòng: " + ex.getMessage());
+                    // Không ném lỗi ra ngoài để luồng thanh toán vẫn thành công
+                }
 
                 result.put("status", "success");
                 result.put("message", "Thanh toán thành công");
@@ -169,7 +177,7 @@ public class PaymentServiceImpl implements IPaymentService {
             paymentRepository.save(payment);
 
             if (booking.getExpiredAt() != null && !booking.getExpiredAt().isAfter(LocalDateTime.now())) {
-                booking.setStatus("cancelled");
+                booking.cancel();
                 bookingRepository.save(booking);
 
                 result.put("status", "failed");
@@ -178,7 +186,7 @@ public class PaymentServiceImpl implements IPaymentService {
                 return result;
             }
 
-            booking.setStatus("pending");
+            booking.setStatus(BookingStatus.PENDING);
             bookingRepository.save(booking);
 
             result.put("status", "failed");
@@ -190,7 +198,7 @@ public class PaymentServiceImpl implements IPaymentService {
             result.put("status", "failed");
             result.put("message", "Có lỗi khi xử lý thanh toán: " + e.getMessage());
             result.put("earnedPoint", "0");
-            result.put("bookingStatus", "pending");
+            result.put("bookingStatus", BookingStatus.PENDING);
             return result;
         }
     }
@@ -198,11 +206,11 @@ public class PaymentServiceImpl implements IPaymentService {
     private void syncBookingState(Booking booking) {
         if (booking == null) return;
 
-        if ("pending".equalsIgnoreCase(booking.getStatus())
+        if (booking.isPending()
                 && booking.getExpiredAt() != null
                 && !booking.getExpiredAt().isAfter(LocalDateTime.now())) {
 
-            booking.setStatus("cancelled");
+            booking.cancel();
             bookingRepository.save(booking);
 
             List<Payment> payments = paymentRepository.findByBookingBookingIDOrderByPaymentIDDesc(booking.getBookingID());
